@@ -19,7 +19,7 @@ class GradiumConfig:
     tts_sample_rate_hz: int = 48000
     tts_chunk_samples: int = 3840  # 80 ms at 48 kHz, 7680 bytes
     tts_model: str = "default"
-    tts_voice_id: str = ""
+    tts_voice_id: str = "YTpq7expH9539ERJ"
 
 
 def load_config() -> GradiumConfig:
@@ -28,5 +28,5 @@ def load_config() -> GradiumConfig:
         api_key=api_key,
         stt_url=os.environ.get("GRADIUM_STT_URL", "wss://api.gradium.ai/api/speech/asr"),
         tts_url=os.environ.get("GRADIUM_TTS_URL", "wss://api.gradium.ai/api/speech/tts"),
-        tts_voice_id=os.environ.get("GRADIUM_TTS_VOICE_ID", ""),
+        tts_voice_id=os.environ.get("GRADIUM_TTS_VOICE_ID", "YTpq7expH9539ERJ"),
     )

@@ -39,6 +39,11 @@ final class AppState: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var voiceTask: Task<Void, Never>?
     private var agentTask: Task<Void, Never>?
+    private var menuListeningActive = false
+    private var transcriptionTimeoutTask: Task<Void, Never>?
+    private var continuousRestartTask: Task<Void, Never>?
+    private var assistantSpeechInProgress = false
+    private var ignoreTranscriptsUntil = Date.distantPast
 
     init() {
         self.voiceClient = VoiceClient()
@@ -73,6 +78,10 @@ final class AppState: ObservableObject {
             }
         }
 
+        audioPlayback.onDrained = { [weak self] in
+            Task { @MainActor in self?.handlePlaybackDrained() }
+        }
+
         audioCapture.onPCMFrame = { [weak self] pcm in
             Task { @MainActor in self?.voiceClient.sendAudioFrame(turnId: self?.activeTurnId ?? "", pcm: pcm) }
         }
@@ -81,6 +90,8 @@ final class AppState: ObservableObject {
     func shutdown() {
         voiceTask?.cancel()
         agentTask?.cancel()
+        transcriptionTimeoutTask?.cancel()
+        continuousRestartTask?.cancel()
         hotkey.stop()
         audioCapture.stop()
         audioPlayback.stop()
@@ -114,13 +125,37 @@ final class AppState: ObservableObject {
     enum ListeningMode { case pushToTalk, continuous }
 
     private func beginListening(mode: ListeningMode) {
-        guard permissions.microphone == .granted else {
-            lastError = "Microphone permission is required."
+        continuousRestartTask?.cancel()
+        if permissions.microphone == .unknown {
+            permissionController.requestMicrophone { [weak self] granted in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.permissionController.refresh { state in
+                        Task { @MainActor in self.permissions = state }
+                    }
+                    if granted {
+                        self.beginListening(mode: mode)
+                    } else {
+                        self.lastError = "Microphone permission is required."
+                        self.voiceState = .error
+                    }
+                }
+            }
             return
         }
+        guard permissions.microphone == .granted else {
+            lastError = "Microphone permission is required."
+            voiceState = .error
+            return
+        }
+        guard voiceState != .listeningPushToTalk && voiceState != .listeningContinuous else { return }
         let turnId = "turn_\(UUID().uuidString.prefix(8))"
         activeTurnId = String(turnId)
         liveTranscript = ""
+        lastError = nil
+        if !assistantSpeechInProgress {
+            ignoreTranscriptsUntil = .distantPast
+        }
         voiceState = mode == .continuous ? .listeningContinuous : .listeningPushToTalk
         voiceClient.sendSttStart(turnId: String(turnId), mode: mode == .continuous ? "continuous" : "push_to_talk")
         audioCapture.start()
@@ -128,9 +163,11 @@ final class AppState: ObservableObject {
 
     private func endListeningPushToTalk() {
         guard voiceState == .listeningPushToTalk, let turnId = activeTurnId else { return }
+        menuListeningActive = false
         audioCapture.stop()
         voiceClient.sendSttFlush(turnId: turnId)
         voiceState = .transcribing
+        startTranscriptionTimeout(for: turnId)
     }
 
     private func toggleContinuousMode() {
@@ -138,15 +175,20 @@ final class AppState: ObservableObject {
         if continuousMode {
             beginListening(mode: .continuous)
         } else {
-            audioCapture.stop()
-            if let turnId = activeTurnId {
-                voiceClient.sendSttStop(turnId: turnId)
-            }
+            menuListeningActive = false
+            stopListeningStream()
+            transcriptionTimeoutTask?.cancel()
+            continuousRestartTask?.cancel()
             voiceState = .idle
         }
     }
 
     private func handleStop() {
+        menuListeningActive = false
+        continuousMode = false
+        continuousRestartTask?.cancel()
+        transcriptionTimeoutTask?.cancel()
+        stopListeningStream()
         stopSpeechAndCancelUtterance()
         agentClient.sendStop()
         if pendingConfirmation != nil {
@@ -155,6 +197,10 @@ final class AppState: ObservableObject {
     }
 
     private func stopSpeechAndCancelUtterance() {
+        transcriptionTimeoutTask?.cancel()
+        continuousRestartTask?.cancel()
+        assistantSpeechInProgress = false
+        ignoreTranscriptsUntil = Date().addingTimeInterval(0.8)
         audioPlayback.stop()
         if let utt = activeUtteranceId {
             voiceClient.sendTtsStop(utteranceId: utt)
@@ -168,8 +214,25 @@ final class AppState: ObservableObject {
     private func handleVoiceMessage(_ message: VoiceClient.Message) async {
         switch message {
         case .transcript(let turnId, let text, let isFinal, _):
+            if shouldIgnoreTranscript(text) {
+                liveTranscript = ""
+                if isFinal && continuousMode {
+                    restartContinuousListening(after: 0.8)
+                }
+                return
+            }
             liveTranscript = text
             if isFinal {
+                transcriptionTimeoutTask?.cancel()
+                stopListeningStream()
+                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    if continuousMode {
+                        restartContinuousListening(after: 0.4)
+                    } else {
+                        voiceState = .idle
+                    }
+                    return
+                }
                 voiceState = .thinking
                 agentClient.submitTurn(turnId: turnId, text: text)
             }
@@ -183,6 +246,25 @@ final class AppState: ObservableObject {
             break
         case .error(let code, let message):
             lastError = "[voice/\(code)] \(message)"
+            transcriptionTimeoutTask?.cancel()
+            audioCapture.stop()
+            if voiceState == .listeningPushToTalk || voiceState == .listeningContinuous || voiceState == .transcribing {
+                voiceState = .error
+            }
+        }
+    }
+
+    private func startTranscriptionTimeout(for turnId: String) {
+        transcriptionTimeoutTask?.cancel()
+        transcriptionTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 8_000_000_000)
+            await MainActor.run {
+                guard let self,
+                      self.activeTurnId == turnId,
+                      self.voiceState == .transcribing else { return }
+                self.lastError = "Voice service did not return a transcript. Start `make services` and check GRADIUM_API_KEY."
+                self.voiceState = .error
+            }
         }
     }
 
@@ -195,6 +277,7 @@ final class AppState: ObservableObject {
                 voiceState = .thinking
             }
         case .sayStart(_, let utteranceId, _):
+            prepareForAssistantSpeech()
             activeUtteranceId = utteranceId
             voiceState = .speaking
             voiceClient.sendTtsSpeak(utteranceId: utteranceId, text: "")
@@ -234,6 +317,16 @@ final class AppState: ObservableObject {
         agentClient.cancelAllWorkers()
     }
 
+    func toggleMenuListening() {
+        if menuListeningActive {
+            menuListeningActive = false
+            endListeningPushToTalk()
+        } else {
+            menuListeningActive = true
+            beginListening(mode: .pushToTalk)
+        }
+    }
+
     // MARK: - Worker list helpers
 
     private func insertOrUpdateWorker(_ summary: WorkerSummary) {
@@ -250,5 +343,71 @@ final class AppState: ObservableObject {
         if !message.isEmpty { workers[i].lastMessage = message }
         if !lastAction.isEmpty { workers[i].lastAction = lastAction }
         workers[i].needsUser = needsUser
+    }
+
+    private func stopListeningStream() {
+        audioCapture.stop()
+        if let turnId = activeTurnId {
+            voiceClient.sendSttStop(turnId: turnId)
+        }
+        activeTurnId = nil
+    }
+
+    private func prepareForAssistantSpeech() {
+        continuousRestartTask?.cancel()
+        transcriptionTimeoutTask?.cancel()
+        stopListeningStream()
+        assistantSpeechInProgress = true
+        ignoreTranscriptsUntil = Date().addingTimeInterval(1.2)
+    }
+
+    private func handlePlaybackDrained() {
+        guard assistantSpeechInProgress else { return }
+        assistantSpeechInProgress = false
+        activeUtteranceId = nil
+        ignoreTranscriptsUntil = Date().addingTimeInterval(0.8)
+        if continuousMode {
+            voiceState = .idle
+            restartContinuousListening(after: 0.8)
+        } else if voiceState == .speaking {
+            voiceState = .idle
+        }
+    }
+
+    private func restartContinuousListening(after delay: TimeInterval) {
+        guard continuousMode else { return }
+        continuousRestartTask?.cancel()
+        continuousRestartTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            await MainActor.run {
+                guard let self,
+                      self.continuousMode,
+                      self.voiceState == .idle,
+                      Date() >= self.ignoreTranscriptsUntil else { return }
+                self.beginListening(mode: .continuous)
+            }
+        }
+    }
+
+    private func shouldIgnoreTranscript(_ text: String) -> Bool {
+        let normalized = normalizeForEcho(text)
+        guard !normalized.isEmpty else { return false }
+        if assistantSpeechInProgress || voiceState == .speaking {
+            return true
+        }
+        if Date() < ignoreTranscriptsUntil {
+            return true
+        }
+        let assistant = normalizeForEcho(lastAssistantText)
+        guard assistant.count >= 12, normalized.count >= 8 else { return false }
+        return assistant.contains(normalized) || normalized.contains(assistant)
+    }
+
+    private func normalizeForEcho(_ text: String) -> String {
+        text
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
     }
 }

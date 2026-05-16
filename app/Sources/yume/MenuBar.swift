@@ -28,7 +28,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         menu.addItem(NSMenuItem.sectionHeader(title: "yume"))
         menu.addItem(.separator())
 
-        let startItem = NSMenuItem(title: "Start Listening", action: #selector(startListening), keyEquivalent: " ")
+        let listeningTitle = appState.voiceState == .listeningPushToTalk ? "Stop Listening" : "Start Listening"
+        let startItem = NSMenuItem(title: listeningTitle, action: #selector(startListening), keyEquivalent: " ")
         startItem.keyEquivalentModifierMask = [.option]
         startItem.target = self
         menu.addItem(startItem)
@@ -63,8 +64,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func startListening() {
-        // Simulate a Right Option press through the AppState to keep the flow uniform.
-        appState.hotkey.onEvent?(.pressed)
+        appState.toggleMenuListening()
     }
 
     @objc private func toggleContinuous() {

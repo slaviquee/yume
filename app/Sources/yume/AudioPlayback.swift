@@ -6,6 +6,8 @@ import AVFoundation
 final class AudioPlayback {
     private let engine = AVAudioEngine()
     private let player = AVAudioPlayerNode()
+    var onDrained: (() -> Void)?
+
     private let format = AVAudioFormat(
         commonFormat: .pcmFormatInt16,
         sampleRate: 48000,
@@ -13,6 +15,12 @@ final class AudioPlayback {
         interleaved: true
     )!
     private var prepared = false
+    private let stateQueue = DispatchQueue(label: "yume.audioPlayback.state")
+    private var pendingBuffers = 0
+
+    var isIdle: Bool {
+        stateQueue.sync { pendingBuffers == 0 }
+    }
 
     func prepare() {
         guard !prepared else { return }
@@ -39,13 +47,34 @@ final class AudioPlayback {
                 memcpy(dst, src, pcm.count)
             }
         }
-        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { _ in }
+        stateQueue.sync {
+            pendingBuffers += 1
+        }
+        player.scheduleBuffer(buffer, completionCallbackType: .dataPlayedBack) { [weak self] _ in
+            guard let self else { return }
+            var drained = false
+            self.stateQueue.sync {
+                self.pendingBuffers = max(0, self.pendingBuffers - 1)
+                drained = self.pendingBuffers == 0
+            }
+            if drained {
+                DispatchQueue.main.async { [weak self] in
+                    self?.onDrained?()
+                }
+            }
+        }
     }
 
     func stop() {
         guard prepared else { return }
         player.stop()
         engine.stop()
+        stateQueue.sync {
+            pendingBuffers = 0
+        }
         prepared = false
+        DispatchQueue.main.async { [weak self] in
+            self?.onDrained?()
+        }
     }
 }

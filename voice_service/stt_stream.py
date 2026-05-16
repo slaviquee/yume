@@ -8,6 +8,7 @@ or on VAD step events (for continuous mode).
 from __future__ import annotations
 
 import asyncio
+import base64
 import dataclasses
 import json
 import logging
@@ -65,6 +66,7 @@ class SttStream:
         self._segment_open: bool = False
         self._started_at: Optional[str] = None
         self._closed: bool = False
+        self._flush_id: int = 0
 
     @property
     def is_open(self) -> bool:
@@ -76,34 +78,34 @@ class SttStream:
         await self._ws.send(
             json.dumps(
                 {
-                    "type": "config",
-                    "model": self.cfg.stt_model,
-                    "sample_rate": self.cfg.stt_sample_rate_hz,
-                    "encoding": "pcm_s16le",
-                    "channels": 1,
-                    "vad": self.cfg.stt_continuous_vad and self.mode == "continuous",
+                    "type": "setup",
+                    "model_name": self.cfg.stt_model,
+                    "input_format": "pcm",
                 }
             )
         )
+        await self._wait_until_ready()
         self._reader_task = asyncio.create_task(self._reader())
 
     async def send_audio(self, pcm: bytes) -> None:
         if not self.is_open:
             raise RuntimeError("stt stream is not open")
-        # Gradium accepts raw binary frames as audio per the docs.
-        await self._ws.send(pcm)  # type: ignore[union-attr]
+        await self._ws.send(  # type: ignore[union-attr]
+            json.dumps({"type": "audio", "audio": base64.b64encode(pcm).decode("ascii")})
+        )
 
     async def send_flush(self) -> None:
         """End-of-input on push-to-talk. Waits for matching `flushed` before
         emitting the final transcript."""
         if not self.is_open:
             return
-        await self._ws.send(json.dumps({"type": "flush"}))  # type: ignore[union-attr]
+        self._flush_id += 1
+        await self._ws.send(json.dumps({"type": "flush", "flush_id": self._flush_id}))  # type: ignore[union-attr]
 
     async def send_eos(self) -> None:
         if not self.is_open:
             return
-        await self._ws.send(json.dumps({"type": "eos"}))  # type: ignore[union-attr]
+        await self._ws.send(json.dumps({"type": "end_of_stream"}))  # type: ignore[union-attr]
 
     async def close(self) -> None:
         self._closed = True
@@ -159,7 +161,7 @@ class SttStream:
         elif kind == "step":
             # VAD step event. In continuous mode, a low inactivity probability
             # signals turn end. Spec default: prob > 0.5 over a 2s horizon.
-            prob = msg.get("inactivity_probability") or msg.get("p") or 0.0
+            prob = _vad_inactivity_probability(msg)
             if self.mode == "continuous" and prob > 0.5 and self._segments:
                 await self._emit_final("vad")
         elif kind == "flushed":
@@ -205,9 +207,37 @@ class SttStream:
         # boundaries is normalized.
         return " ".join(s.strip() for s in self._segments if s.strip())
 
+    async def _wait_until_ready(self) -> None:
+        assert self._ws is not None
+        while True:
+            raw = await asyncio.wait_for(self._ws.recv(), timeout=10)
+            if isinstance(raw, bytes):
+                continue
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            kind = msg.get("type") or msg.get("event")
+            if kind == "ready":
+                return
+            if kind == "error":
+                raise RuntimeError(msg.get("message", "stt setup failed"))
+
 
 def _now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _vad_inactivity_probability(msg: dict) -> float:
+    vad = msg.get("vad")
+    if isinstance(vad, list) and vad:
+        for item in vad:
+            if isinstance(item, dict) and item.get("horizon_s") == 2.0:
+                return float(item.get("inactivity_prob") or 0.0)
+        last = vad[-1]
+        if isinstance(last, dict):
+            return float(last.get("inactivity_prob") or 0.0)
+    return float(msg.get("inactivity_probability") or msg.get("p") or 0.0)
 
 
 async def iter_events(stream: SttStream) -> AsyncIterator[SttEvent]:

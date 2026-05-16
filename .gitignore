@@ -13,12 +13,14 @@ build/
 *.xcodeproj/project.xcworkspace/xcuserdata/
 *.app/
 xcuserdata/
+app/Info.plist
 
 # Python
 __pycache__/
 *.py[cod]
 *.egg-info/
 .venv/
+.venv-hermes/
 venv/
 .env
 .env.*

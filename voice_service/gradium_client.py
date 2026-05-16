@@ -3,7 +3,7 @@
 These wrap the documented endpoints described in docs/spec.md section 8.
 The voice_service modules build STT and TTS streams on top of these.
 
-API keys are passed in an Authorization header. They are never logged or
+API keys are passed in Gradium's documented `x-api-key` header. They are never logged or
 serialized into events.
 """
 from __future__ import annotations
@@ -23,9 +23,14 @@ async def open_gradium_ws(url: str, api_key: str) -> WebSocketClientProtocol:
         raise RuntimeError(
             "GRADIUM_API_KEY is not set; configure it in the environment or Keychain"
         )
-    headers = {"Authorization": f"Bearer {api_key}"}
+    headers = {"x-api-key": api_key}
     log.debug("connecting to %s", url)
-    return await websockets.connect(url, extra_headers=headers, max_size=2**24)
+    try:
+        return await websockets.connect(url, additional_headers=headers, max_size=2**24)
+    except TypeError:
+        # websockets < 14 used extra_headers; keep the helper compatible with
+        # older hackathon machines.
+        return await websockets.connect(url, extra_headers=headers, max_size=2**24)
 
 
 async def safe_close(ws: Optional[WebSocketClientProtocol]) -> None:

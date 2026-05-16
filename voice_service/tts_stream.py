@@ -10,6 +10,7 @@ Implements docs/spec.md section 8.2 rules:
 from __future__ import annotations
 
 import asyncio
+import base64
 import dataclasses
 import json
 import logging
@@ -64,15 +65,14 @@ class TtsStream:
         await self._ws.send(
             json.dumps(
                 {
-                    "type": "config",
-                    "model": self.cfg.tts_model,
+                    "type": "setup",
+                    "model_name": self.cfg.tts_model,
                     "voice_id": self.voice_id,
-                    "sample_rate": self.cfg.tts_sample_rate_hz,
-                    "encoding": "pcm_s16le",
-                    "channels": 1,
+                    "output_format": "pcm",
                 }
             )
         )
+        await self._wait_until_ready()
         self._reader_task = asyncio.create_task(self._reader())
 
     async def append(self, text: str) -> None:
@@ -98,6 +98,7 @@ class TtsStream:
             self._buffer = ""
         if self._ws is not None:
             await self._ws.send(json.dumps({"type": "text", "text": "<flush>"}))
+            await self._ws.send(json.dumps({"type": "end_of_stream"}))
 
     async def cancel(self) -> None:
         """Stop pending audio output. Used for barge-in."""
@@ -132,16 +133,24 @@ class TtsStream:
                 if self._cancelled:
                     break
                 if isinstance(raw, bytes):
-                    await self._emit(
-                        TtsEvent(type="audio", utterance_id=self.utterance_id, pcm=raw)
-                    )
+                    await self._emit(TtsEvent(type="audio", utterance_id=self.utterance_id, pcm=raw))
                     continue
                 try:
                     msg = json.loads(raw)
                 except json.JSONDecodeError:
                     continue
                 kind = msg.get("type") or msg.get("event")
-                if kind in ("end_of_stream", "done"):
+                if kind == "audio":
+                    pcm = msg.get("audio", "")
+                    if isinstance(pcm, str):
+                        await self._emit(
+                            TtsEvent(
+                                type="audio",
+                                utterance_id=self.utterance_id,
+                                pcm=base64.b64decode(pcm),
+                            )
+                        )
+                elif kind in ("end_of_stream", "done"):
                     await self._emit(
                         TtsEvent(type="done", utterance_id=self.utterance_id)
                     )
@@ -157,6 +166,22 @@ class TtsStream:
             await self._emit(
                 TtsEvent(type="error", utterance_id=self.utterance_id, message=str(e))
             )
+
+    async def _wait_until_ready(self) -> None:
+        assert self._ws is not None
+        while True:
+            raw = await asyncio.wait_for(self._ws.recv(), timeout=10)
+            if isinstance(raw, bytes):
+                continue
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            kind = msg.get("type") or msg.get("event")
+            if kind == "ready":
+                return
+            if kind == "error":
+                raise RuntimeError(msg.get("message", "tts setup failed"))
 
 
 def split_for_tts(text: str) -> list[str]:

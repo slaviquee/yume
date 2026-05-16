@@ -55,5 +55,5 @@ through the menu's "Start Listening" item.
 
 ## Dependencies
 
-* [Starscream](https://github.com/daltoniam/Starscream) — WebSocket client.
-  Bundled via SPM through `project.yml`.
+The app uses Apple's built-in `URLSessionWebSocketTask` for localhost helper
+connections, so the stage-1 build has no Swift package dependency fetch.

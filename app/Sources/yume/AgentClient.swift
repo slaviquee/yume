@@ -1,9 +1,8 @@
 import Foundation
-import Starscream
 
 /// WebSocket client to the agent_service (localhost). Submits user turns,
 /// receives streamed assistant speech text + worker events.
-final class AgentClient: WebSocketDelegate {
+final class AgentClient {
     enum Message {
         case thinking(turnId: String, active: Bool)
         case sayStart(turnId: String, utteranceId: String, interruptible: Bool)
@@ -17,10 +16,11 @@ final class AgentClient: WebSocketDelegate {
         case error(code: String, message: String)
     }
 
-    private var socket: WebSocket?
+    private var socket: URLSessionWebSocketTask?
     private var continuation: AsyncStream<Message>.Continuation?
     private var connected = false
-    private var pending: [Data] = []
+    private var pending: [String] = []
+    private var reconnectScheduled = false
 
     func connect() -> AsyncStream<Message> {
         AsyncStream { continuation in
@@ -33,25 +33,22 @@ final class AgentClient: WebSocketDelegate {
     }
 
     func disconnect() {
-        socket?.disconnect()
+        socket?.cancel(with: .goingAway, reason: nil)
         socket = nil
         connected = false
     }
 
     private func openSocket() {
+        socket?.cancel(with: .goingAway, reason: nil)
         let port = ProcessInfo.processInfo.environment["YUME_AGENT_PORT"] ?? "7422"
         guard let url = URL(string: "ws://127.0.0.1:\(port)") else { return }
-        var request = URLRequest(url: url)
-        request.timeoutInterval = 5
-        let ws = WebSocket(request: request)
-        ws.delegate = self
-        ws.connect()
+        let ws = URLSession.shared.webSocketTask(with: url)
         socket = ws
-
-        DispatchQueue.global().asyncAfter(deadline: .now() + 3) { [weak self] in
-            guard let self, !self.connected else { return }
-            self.openSocket()
-        }
+        connected = true
+        reconnectScheduled = false
+        ws.resume()
+        flushPending()
+        receiveNext()
     }
 
     // MARK: - Outbound
@@ -84,31 +81,48 @@ final class AgentClient: WebSocketDelegate {
         guard let data = try? JSONSerialization.data(withJSONObject: payload),
               let str = String(data: data, encoding: .utf8) else { return }
         if connected {
-            socket?.write(string: str)
+            socket?.send(.string(str)) { [weak self] error in
+                if error != nil { self?.scheduleReconnect() }
+            }
         } else {
-            pending.append(data)
+            pending.append(str)
         }
     }
 
     private func flushPending() {
-        for d in pending {
-            if let s = String(data: d, encoding: .utf8) { socket?.write(string: s) }
+        for s in pending {
+            socket?.send(.string(s)) { [weak self] error in
+                if error != nil { self?.scheduleReconnect() }
+            }
         }
         pending.removeAll()
     }
 
-    func didReceive(event: WebSocketEvent, client: WebSocketClient) {
-        switch event {
-        case .connected:
-            connected = true
-            flushPending()
-        case .disconnected, .cancelled, .error:
-            connected = false
-            DispatchQueue.global().asyncAfter(deadline: .now() + 2) { [weak self] in self?.openSocket() }
-        case .text(let text):
-            handle(text)
-        case .binary, .ping, .pong, .viabilityChanged, .reconnectSuggested, .peerClosed:
-            break
+    private func receiveNext() {
+        socket?.receive { [weak self] result in
+            guard let self else { return }
+            switch result {
+            case .success(.string(let text)):
+                self.handle(text)
+                self.receiveNext()
+            case .success(.data):
+                self.receiveNext()
+            case .failure:
+                self.scheduleReconnect()
+            @unknown default:
+                self.receiveNext()
+            }
+        }
+    }
+
+    private func scheduleReconnect() {
+        guard !reconnectScheduled else { return }
+        connected = false
+        reconnectScheduled = true
+        socket?.cancel(with: .goingAway, reason: nil)
+        socket = nil
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) { [weak self] in
+            self?.openSocket()
         }
     }
 

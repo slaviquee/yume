@@ -364,6 +364,10 @@ Docs-aligned implementation notes:
 - Default PCM input is 24 kHz, 16-bit signed little-endian, mono.
 - Send 1920-sample / 3840-byte chunks, which is 80 ms at 24 kHz.
 - Direct WebSocket fallback endpoint: wss://api.gradium.ai/api/speech/asr.
+- Direct WebSocket auth uses the `x-api-key` header.
+- Direct WebSocket setup is `{"type":"setup","model_name":"default","input_format":"pcm"}`.
+- Wait for the provider `ready` message before sending audio.
+- Send audio as JSON messages with base64 PCM: `{"type":"audio","audio":"..."}`.
 - Treat provider `text` messages as segment text, not final app turns by themselves.
 - Pair `text` with `end_text` by stream id when timestamps are needed.
 - Use `step` VAD events for continuous-mode turn detection.
@@ -419,6 +423,9 @@ Docs-aligned implementation notes:
 - Default PCM output is 48 kHz, 16-bit signed mono.
 - PCM chunks are 3840 samples / 7680 bytes, which is 80 ms at 48 kHz.
 - Direct WebSocket fallback endpoint: wss://api.gradium.ai/api/speech/tts.
+- Direct WebSocket auth uses the `x-api-key` header.
+- Direct WebSocket setup is `{"type":"setup","voice_id":"...","model_name":"default","output_format":"pcm"}`.
+- Wait for the provider `ready` message before sending text.
 - Incremental assistant text can be sent with an async generator or multiple text messages.
 - Split incremental text on whitespace only.
 - Never split inside a word or put punctuation in its own chunk, because Gradium inserts whitespace between messages.

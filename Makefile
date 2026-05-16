@@ -1,4 +1,4 @@
-.PHONY: help install services voice agent app generate build clean test fmt
+.PHONY: help install services services-detached voice agent app generate build clean test fmt
 
 PY := python3
 VENV := .venv
@@ -9,6 +9,7 @@ help:
 	@echo "Targets:"
 	@echo "  install     create .venv and install Python deps"
 	@echo "  services    run voice_service and agent_service together"
+	@echo "  services-detached run helpers in the background with logs"
 	@echo "  voice       run voice_service only"
 	@echo "  agent       run agent_service only"
 	@echo "  generate    regenerate Xcode project (requires xcodegen)"
@@ -31,6 +32,9 @@ services:
 	$(PYTHON) -m voice_service & \
 	$(PYTHON) -m agent_service & \
 	wait
+
+services-detached:
+	/bin/bash scripts/run_services_detached.sh
 
 voice:
 	$(PYTHON) -m voice_service

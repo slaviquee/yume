@@ -2,7 +2,7 @@ import SwiftUI
 import AppKit
 
 @main
-struct YumeApp: App {
+struct AppMain: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
 
     var body: some Scene {
@@ -13,6 +13,7 @@ struct YumeApp: App {
     }
 }
 
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     let appState = AppState()
     private var menuBarController: MenuBarController?

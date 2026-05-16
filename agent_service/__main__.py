@@ -6,7 +6,11 @@ import logging
 import os
 import signal
 
+from dotenv import load_dotenv
+
 from .server import AgentServer
+
+load_dotenv()
 
 logging.basicConfig(
     level=logging.DEBUG if os.environ.get("YUME_DEBUG") == "1" else logging.INFO,

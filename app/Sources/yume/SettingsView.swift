@@ -67,7 +67,7 @@ struct SettingsView: View {
             HStack {
                 Text("Foreground model")
                 Spacer()
-                Text(ProcessInfo.processInfo.environment["YUME_FOREGROUND_MODEL"] ?? "claude-sonnet-4-6")
+                Text(ProcessInfo.processInfo.environment["YUME_FOREGROUND_MODEL"] ?? "claude-sonnet-4-20250514")
                     .foregroundStyle(.secondary)
                     .monospaced()
             }

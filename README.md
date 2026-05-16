@@ -68,9 +68,11 @@ make app
 
 # 4. Run the helper services (two terminals or use the Makefile target)
 make services
+# or, for demo runs that keep helpers in the background:
+make services-detached
 
 # 5. Launch the Mac app
-open app/build/yume.app
+open app/build/Build/Products/Debug/yume.app
 ```
 
 See [`docs/spec.md`](docs/spec.md) section 18 for the full implementation milestones.

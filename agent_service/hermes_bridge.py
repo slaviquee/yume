@@ -6,8 +6,10 @@ directly — it consumes the normalized `HermesEvent` stream below.
 
 Two implementations:
 
-* `RealHermesBridge` — spawns the `hermes` CLI in `-t computer_use` mode with
-  the worker instruction. Output is parsed as newline-delimited JSON.
+* `RealHermesBridge` — spawns the Hermes CLI in non-interactive chat mode with
+  the `computer_use` toolset enabled. The current Hermes CLI is optimized for
+  terminal UX, so this bridge treats stdout/stderr as process output and emits
+  normalized yume worker events around it.
   Note: we use ``asyncio.create_subprocess_exec`` which passes argv as a list
   — no shell interpretation, no command injection surface.
 * `MockHermesBridge` — a deterministic timer-based simulator used when Hermes
@@ -23,6 +25,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import os
 import shutil
 import time
 from typing import AsyncIterator, Literal, Optional
@@ -84,71 +87,111 @@ class RealHermesBridge(HermesBridge):
 
     def __init__(self, hermes_bin: str = "hermes") -> None:
         self.hermes_bin = hermes_bin
+        self.provider = os.environ.get("HERMES_INFERENCE_PROVIDER", "anthropic")
+        self.model = (
+            os.environ.get("HERMES_INFERENCE_MODEL")
+            or os.environ.get("YUME_WORKER_MODEL")
+            or os.environ.get("YUME_FOREGROUND_MODEL")
+            or "claude-sonnet-4-20250514"
+        )
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._confirm_queues: dict[str, asyncio.Queue[str]] = {}
 
     async def run(self, spec: HermesTaskSpec) -> AsyncIterator[HermesEvent]:
+        self._confirm_queues[spec.task_id] = asyncio.Queue()
+        seq = 0
+
+        if spec.require_user_confirmation:
+            seq += 1
+            yield HermesEvent(
+                kind="needs_confirmation",
+                sequence=seq,
+                timestamp=time.time(),
+                message=f"Start background worker \"{spec.title}\"?",
+                risk_level=spec.risk_level,
+                choices=("confirm", "cancel"),
+            )
+            decision = await self._confirm_queues[spec.task_id].get()
+            if decision != "confirm":
+                seq += 1
+                yield HermesEvent(
+                    kind="result",
+                    sequence=seq,
+                    timestamp=time.time(),
+                    status="cancelled",
+                    summary="user declined confirmation",
+                )
+                self._confirm_queues.pop(spec.task_id, None)
+                return
+
+        seq += 1
+        yield HermesEvent(
+            kind="progress",
+            sequence=seq,
+            timestamp=time.time(),
+            message="starting Hermes computer-use worker",
+            last_action="hermes.chat",
+        )
+
+        prompt = self._build_prompt(spec)
         argv = [
             self.hermes_bin,
-            "-t",
+            "chat",
+            "--quiet",
+            "--query",
+            prompt,
+            "--provider",
+            self.provider,
+            "--model",
+            self.model,
+            "--toolsets",
             "computer_use",
-            "run",
-            "--json",
-            "--instruction",
-            spec.instruction,
-            "--capture-mode",
-            spec.capture_mode,
+            "--source",
+            "tool",
+            "--max-turns",
+            "40",
         ]
-        for app in spec.allowed_apps:
-            argv.extend(["--app", app])
 
         log.info("spawning hermes: task=%s apps=%s", spec.task_id, spec.allowed_apps)
+        env = os.environ.copy()
+        env.setdefault("HERMES_INFERENCE_PROVIDER", self.provider)
+        env.setdefault("HERMES_INFERENCE_MODEL", self.model)
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         self._processes[spec.task_id] = proc
-        self._confirm_queues[spec.task_id] = asyncio.Queue()
 
-        seq = 0
         try:
-            assert proc.stdout is not None
-            while True:
-                try:
-                    line = await asyncio.wait_for(proc.stdout.readline(), timeout=spec.timeout_sec)
-                except asyncio.TimeoutError:
-                    yield HermesEvent(kind="error", sequence=seq, timestamp=time.time(), message="timeout")
-                    break
-                if not line:
-                    rc = await proc.wait()
-                    if rc != 0:
-                        stderr = (await proc.stderr.read()).decode("utf-8", errors="replace") if proc.stderr else ""
-                        yield HermesEvent(
-                            kind="error",
-                            sequence=seq,
-                            timestamp=time.time(),
-                            message=f"hermes exited rc={rc}: {stderr.strip()[:300]}",
-                        )
-                    break
-                try:
-                    msg = json.loads(line.decode("utf-8", errors="replace"))
-                except json.JSONDecodeError:
-                    log.debug("hermes non-json line: %r", line[:200])
-                    continue
-                seq += 1
-                ev = self._normalize(msg, seq)
-                yield ev
-                if ev.kind in ("result", "error"):
-                    break
-                if ev.kind == "needs_confirmation":
-                    decision = await self._confirm_queues[spec.task_id].get()
-                    if proc.stdin is not None and not proc.stdin.is_closing():
-                        proc.stdin.write(
-                            (json.dumps({"type": "confirmation", "decision": decision}) + "\n").encode()
-                        )
-                        await proc.stdin.drain()
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=spec.timeout_sec)
+            except asyncio.TimeoutError:
+                yield HermesEvent(kind="error", sequence=seq + 1, timestamp=time.time(), message="timeout")
+                return
+
+            out_text = stdout.decode("utf-8", errors="replace")
+            err_text = stderr.decode("utf-8", errors="replace")
+            if proc.returncode != 0:
+                message = self._clean_output(err_text or out_text) or f"hermes exited rc={proc.returncode}"
+                yield HermesEvent(
+                    kind="error",
+                    sequence=seq + 1,
+                    timestamp=time.time(),
+                    message=message[:800],
+                )
+                return
+
+            summary = self._clean_output(out_text) or "Hermes worker completed."
+            yield HermesEvent(
+                kind="result",
+                sequence=seq + 1,
+                timestamp=time.time(),
+                status="completed",
+                summary=summary[:1200],
+            )
         finally:
             self._processes.pop(spec.task_id, None)
             self._confirm_queues.pop(spec.task_id, None)
@@ -179,6 +222,39 @@ class RealHermesBridge(HermesBridge):
         if queue is None:
             return
         await queue.put(decision)
+
+    def _build_prompt(self, spec: HermesTaskSpec) -> str:
+        apps = ", ".join(spec.allowed_apps) if spec.allowed_apps else "the minimum required apps"
+        return "\n".join(
+            [
+                "You are a yume background Mac worker.",
+                "Use the computer_use toolset when macOS UI interaction is required.",
+                f"Task title: {spec.title}",
+                f"Allowed apps: {apps}. Do not operate apps outside this list unless the task is impossible otherwise.",
+                f"Capture mode preference: {spec.capture_mode}.",
+                "Do not type or request passwords, API keys, 2FA codes, payment details, or other secrets.",
+                "Do not click permission dialogs, payment UI, destructive delete controls, or account/security settings.",
+                "Keep the task bounded. Return a concise final summary of what you did and anything the user must review.",
+                "",
+                "User task:",
+                spec.instruction,
+            ]
+        )
+
+    @staticmethod
+    def _clean_output(text: str) -> str:
+        lines: list[str] = []
+        for raw in text.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            low = line.lower()
+            if low.startswith("session id:") or low.startswith("session_id:"):
+                continue
+            if low.startswith("cost:") or low.startswith("tokens:"):
+                continue
+            lines.append(line)
+        return "\n".join(lines).strip()
 
     def _normalize(self, msg: dict, sequence: int) -> HermesEvent:
         kind = msg.get("type", "progress")
