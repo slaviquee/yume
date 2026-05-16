@@ -1,0 +1,45 @@
+# macOS
+.DS_Store
+*.swp
+
+# Xcode / SwiftPM
+.build/
+.swiftpm/
+DerivedData/
+build/
+*.xcodeproj/
+*.xcworkspace/xcuserdata/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+*.app/
+xcuserdata/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors
+.vscode/
+.idea/
+*.iml
+
+# yume runtime
+sessions/
+logs/
+*.log
+screenshots/
+audio_dumps/
+
+# Secrets — never commit
+gradium_api_key*
+*.key
+*.pem
