@@ -72,6 +72,8 @@ class SttStream:
         self._started_at: Optional[str] = None
         self._closed: bool = False
         self._flush_id: int = 0
+        self._ready_event = asyncio.Event()
+        self._setup_error: Optional[str] = None
 
     @property
     def is_open(self) -> bool:
@@ -89,7 +91,12 @@ class SttStream:
             setup["json_config"] = self.cfg.stt_json_config
         await self._send_json(setup)
         self._reader_task = asyncio.create_task(self._reader())
-        self._accepting_audio = True
+        try:
+            await asyncio.wait_for(self._ready_event.wait(), timeout=5.0)
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError("timed out waiting for Gradium STT ready") from exc
+        if self._setup_error:
+            raise RuntimeError(self._setup_error)
         if self.cfg.stt_input_format == "opus":
             self._opus_encoder = OggOpusEncoder(
                 sample_rate_hz=self.cfg.stt_sample_rate_hz,
@@ -97,6 +104,7 @@ class SttStream:
                 emit=self._send_audio_payload,
             )
             await self._opus_encoder.start()
+        self._accepting_audio = True
 
     async def send_audio(self, pcm: bytes) -> None:
         if not self.is_open:
@@ -173,6 +181,9 @@ class SttStream:
                     continue
                 await self._handle_message(msg)
         except Exception as e:  # noqa: BLE001
+            if not self._ready_event.is_set():
+                self._setup_error = str(e)
+                self._ready_event.set()
             await self._emit(
                 SttEvent(type="error", turn_id=self.turn_id, message=str(e))
             )
@@ -218,12 +229,17 @@ class SttStream:
                 self.turn_id,
                 msg.get("delay_in_frames", ""),
             )
+            self._ready_event.set()
         elif kind == "error":
+            message = msg.get("message", "stt error")
+            if not self._ready_event.is_set():
+                self._setup_error = message
+                self._ready_event.set()
             await self._emit(
                 SttEvent(
                     type="error",
                     turn_id=self.turn_id,
-                    message=msg.get("message", "stt error"),
+                    message=message,
                 )
             )
         else:
@@ -256,20 +272,9 @@ class SttStream:
         return " ".join(s.strip() for s in self._segments if s.strip())
 
     async def _wait_until_ready(self) -> None:
-        assert self._ws is not None
-        while True:
-            raw = await asyncio.wait_for(self._ws.recv(), timeout=10)
-            if isinstance(raw, bytes):
-                continue
-            try:
-                msg = json.loads(raw)
-            except json.JSONDecodeError:
-                continue
-            kind = msg.get("type") or msg.get("event")
-            if kind == "ready":
-                return
-            if kind == "error":
-                raise RuntimeError(msg.get("message", "stt setup failed"))
+        await asyncio.wait_for(self._ready_event.wait(), timeout=10)
+        if self._setup_error:
+            raise RuntimeError(self._setup_error)
 
 
 def _now() -> str:

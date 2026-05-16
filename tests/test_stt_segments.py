@@ -132,3 +132,22 @@ async def test_audio_after_opus_flush_is_ignored():
     assert encoder.writes == [b"opus input"]
     assert encoder.finished is True
     assert [msg["type"] for msg in ws.sent] == ["flush"]
+
+
+async def test_ready_event_releases_stt_setup_gate():
+    stream = SttStream(_cfg(), mode="push_to_talk", turn_id="t7")
+
+    assert stream._ready_event.is_set() is False
+
+    await stream._handle_message({"type": "ready", "delay_in_frames": 16})
+
+    assert stream._ready_event.is_set() is True
+
+
+async def test_setup_error_releases_stt_setup_gate():
+    stream = SttStream(_cfg(), mode="push_to_talk", turn_id="t8")
+    events = await _drive(stream, [{"type": "error", "message": "bad setup"}])
+
+    assert stream._ready_event.is_set() is True
+    assert stream._setup_error == "bad setup"
+    assert [e.message for e in events if e.type == "error"] == ["bad setup"]
