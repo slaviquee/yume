@@ -144,6 +144,7 @@ class Orchestrator:
 
     async def _run_turn(self, turn_id: str, user_text: str) -> None:
         utterance_id = f"utt_{uuid.uuid4().hex[:12]}"
+        user_text = self._normalize_user_text(user_text)
 
         # Inject a fresh snapshot of workers each turn so the agent never
         # invents worker state from memory.
@@ -225,8 +226,9 @@ class Orchestrator:
             await self._emit({"type": "agent.say_end", "utteranceId": utterance_id})
         await self._emit({"type": "agent.thinking", "turnId": turn_id, "active": False})
 
-        if assistant_blocks:
-            self._history.append(ConversationMessage(role="assistant", content=assistant_blocks))
+        history_blocks = [b for b in assistant_blocks if b.get("type") == "text"]
+        if history_blocks:
+            self._history.append(ConversationMessage(role="assistant", content=history_blocks))
 
         for call in tool_calls:
             await self._execute_tool(call)
@@ -241,6 +243,26 @@ class Orchestrator:
                 f"risk={w['riskLevel']} apps={w['targetApps']} msg={w['lastMessage']!r}"
             )
         return "\n".join(lines)
+
+    @staticmethod
+    def _normalize_user_text(text: str) -> str:
+        stripped = text.strip()
+        low = " ".join(stripped.lower().split())
+        textedit_mishears = {
+            "open taxi",
+            "open taxi.",
+            "open text held",
+            "open text held.",
+            "open texthead",
+            "open texthead.",
+            "open text at it",
+            "open text at it.",
+            "oh text held",
+            "oh text held.",
+        }
+        if low in textedit_mishears:
+            return "Open TextEdit."
+        return stripped
 
     @staticmethod
     def _serialize_block(block) -> dict:

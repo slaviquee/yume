@@ -62,16 +62,19 @@ pip install -r voice_service/requirements.txt -r agent_service/requirements.txt
 cp .env.example .env
 # edit .env with GRADIUM_API_KEY, ANTHROPIC_API_KEY, etc.
 
-# 3. Generate + build the Mac app
+# 3. Install/patch Hermes computer_use runtime deps
+make hermes-deps
+
+# 4. Generate + build the Mac app
 cd app && xcodegen generate && cd ..
 make app
 
-# 4. Run the helper services (two terminals or use the Makefile target)
+# 5. Run the helper services (two terminals or use the Makefile target)
 make services
 # or, for demo runs that keep helpers in the background:
 make services-detached
 
-# 5. Launch the Mac app
+# 6. Launch the Mac app
 open app/build/Build/Products/Debug/yume.app
 ```
 

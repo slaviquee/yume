@@ -1,4 +1,4 @@
-.PHONY: help install services services-detached voice agent app generate build clean test fmt
+.PHONY: help install hermes-deps hermes-patch services services-detached voice agent app generate build clean test fmt
 
 PY := python3
 VENV := .venv
@@ -8,6 +8,7 @@ PYTHON := $(VENV)/bin/python
 help:
 	@echo "Targets:"
 	@echo "  install     create .venv and install Python deps"
+	@echo "  hermes-deps install/patch Hermes computer_use runtime deps"
 	@echo "  services    run voice_service and agent_service together"
 	@echo "  services-detached run helpers in the background with logs"
 	@echo "  voice       run voice_service only"
@@ -27,19 +28,31 @@ install: $(VENV)/bin/python
 	$(PIP) install -r agent_service/requirements.txt
 	$(PIP) install -r tests/requirements.txt
 
-services:
+hermes-deps:
+	@test -x .venv-hermes/bin/pip || (echo ".venv-hermes is missing; install Hermes first" >&2; exit 1)
+	.venv-hermes/bin/pip install mcp websockets
+	.venv-hermes/bin/python scripts/patch_hermes_computer_use.py
+
+hermes-patch:
+	@if [ -x .venv-hermes/bin/python ]; then \
+		.venv-hermes/bin/python scripts/patch_hermes_computer_use.py; \
+	else \
+		echo ".venv-hermes not found; skipping Hermes computer_use patch"; \
+	fi
+
+services: hermes-patch
 	@trap 'kill 0' INT; \
 	$(PYTHON) -m voice_service & \
 	$(PYTHON) -m agent_service & \
 	wait
 
-services-detached:
+services-detached: hermes-patch
 	/bin/bash scripts/run_services_detached.sh
 
 voice:
 	$(PYTHON) -m voice_service
 
-agent:
+agent: hermes-patch
 	$(PYTHON) -m agent_service
 
 generate:

@@ -25,6 +25,11 @@ Only call `dispatch_worker` for things that require operating Mac apps. Direct
 answers (questions, summaries from your own knowledge) are spoken without
 calling tools.
 
+Opening or launching a macOS app counts as operating Mac apps. For commands
+like "open Terminal", "launch TextEdit", or "open Calculator", briefly say
+you're starting it and call `dispatch_worker` with that app as the only
+`allowed_apps` entry.
+
 ## Worker rules you must enforce
 
 * Always pass the most restricted set of `allowed_apps` that will work.

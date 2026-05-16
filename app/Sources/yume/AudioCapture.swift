@@ -9,6 +9,7 @@ final class AudioCapture {
 
     private let engine = AVAudioEngine()
     private var converter: AVAudioConverter?
+    private let preprocessor = VoicePreprocessor()
     private let outputFormat = AVAudioFormat(
         commonFormat: .pcmFormatInt16,
         sampleRate: 24000,
@@ -23,6 +24,7 @@ final class AudioCapture {
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
         converter = AVAudioConverter(from: inputFormat, to: outputFormat)
+        preprocessor.reset()
         guard converter != nil else {
             NSLog("yume: failed to create audio converter from %@", inputFormat)
             return
@@ -72,8 +74,73 @@ final class AudioCapture {
 
         guard let channelData = outBuffer.int16ChannelData else { return }
         let frameCount = Int(outBuffer.frameLength)
+        preprocessor.process(channelData[0], count: frameCount)
         let byteCount = frameCount * 2 // int16 = 2 bytes
         let data = Data(bytes: channelData[0], count: byteCount)
         onPCMFrame?(data)
+    }
+}
+
+private final class VoicePreprocessor {
+    private var previousInput: Float = 0
+    private var previousHighPass: Float = 0
+    private var noiseFloorRMS: Float = 0.0025
+    private var smoothedGain: Float = 1.0
+    private var speechHangoverFrames = 0
+
+    func reset() {
+        previousInput = 0
+        previousHighPass = 0
+        noiseFloorRMS = 0.0025
+        smoothedGain = 1.0
+        speechHangoverFrames = 0
+    }
+
+    func process(_ samples: UnsafeMutablePointer<Int16>, count: Int) {
+        guard count > 0 else { return }
+
+        var processed = [Float](repeating: 0, count: count)
+        var sumSquares: Float = 0
+
+        for i in 0..<count {
+            let input = Float(samples[i]) / 32768.0
+            let highPassed = input - previousInput + 0.995 * previousHighPass
+            previousInput = input
+            previousHighPass = highPassed
+            processed[i] = highPassed
+            sumSquares += highPassed * highPassed
+        }
+
+        let rms = sqrt(sumSquares / Float(count))
+        let speechThreshold = max(noiseFloorRMS * 1.8, 0.003)
+        let isSpeech = rms > speechThreshold
+
+        if isSpeech {
+            speechHangoverFrames = 8
+        } else {
+            speechHangoverFrames = max(0, speechHangoverFrames - 1)
+            let updateAlpha: Float = rms < noiseFloorRMS ? 0.90 : 0.98
+            noiseFloorRMS = updateAlpha * noiseFloorRMS + (1 - updateAlpha) * rms
+        }
+
+        let speechActive = isSpeech || speechHangoverFrames > 0
+        let attenuation: Float = speechActive ? 1.0 : 0.55
+        let desiredGain: Float
+        if speechActive {
+            desiredGain = min(max(0.09 / max(rms, 0.001), 0.75), 3.2)
+        } else {
+            desiredGain = 1.0
+        }
+        smoothedGain = 0.92 * smoothedGain + 0.08 * desiredGain
+
+        for i in 0..<count {
+            let cleaned = softLimit(processed[i] * smoothedGain * attenuation)
+            samples[i] = Int16(max(-32768, min(32767, Int(cleaned * 32767.0))))
+        }
+    }
+
+    private func softLimit(_ sample: Float) -> Float {
+        let clipped = max(-1.2, min(1.2, sample))
+        return clipped / (1 + abs(clipped) * 0.18)
     }
 }

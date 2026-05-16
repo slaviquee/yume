@@ -130,15 +130,13 @@ class RealHermesBridge(HermesBridge):
             sequence=seq,
             timestamp=time.time(),
             message="starting Hermes computer-use worker",
-            last_action="hermes.chat",
+            last_action="hermes.oneshot",
         )
 
         prompt = self._build_prompt(spec)
         argv = [
             self.hermes_bin,
-            "chat",
-            "--quiet",
-            "--query",
+            "--oneshot",
             prompt,
             "--provider",
             self.provider,
@@ -146,16 +144,16 @@ class RealHermesBridge(HermesBridge):
             self.model,
             "--toolsets",
             "computer_use",
-            "--source",
-            "tool",
-            "--max-turns",
-            "40",
+            "--ignore-rules",
         ]
 
         log.info("spawning hermes: task=%s apps=%s", spec.task_id, spec.allowed_apps)
         env = os.environ.copy()
         env.setdefault("HERMES_INFERENCE_PROVIDER", self.provider)
         env.setdefault("HERMES_INFERENCE_MODEL", self.model)
+        cua_driver = shutil.which("cua-driver")
+        if cua_driver:
+            env.setdefault("HERMES_CUA_DRIVER_CMD", cua_driver)
         proc = await asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.PIPE,
@@ -229,6 +227,9 @@ class RealHermesBridge(HermesBridge):
             [
                 "You are a yume background Mac worker.",
                 "Use the computer_use toolset when macOS UI interaction is required.",
+                "For requests to open or launch an app, call computer_use(action='list_apps') to find the bundle_id, then computer_use(action='launch_app', bundle_id='...').",
+                "After launching, stop unless the user asked you to do more inside the app.",
+                "For writing into a blank document editor such as TextEdit, launch the app, send computer_use(action='key', keys='cmd+n') if a new document is needed, then use computer_use(action='type', text='...'). Do not wait for a screenshot before creating the first document window.",
                 f"Task title: {spec.title}",
                 f"Allowed apps: {apps}. Do not operate apps outside this list unless the task is impossible otherwise.",
                 f"Capture mode preference: {spec.capture_mode}.",

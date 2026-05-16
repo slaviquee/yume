@@ -50,6 +50,12 @@ class TestEvaluate:
         assert d.require_confirmation or d.is_blocked
         assert "Terminal" in d.blocked_apps
 
+    def test_opening_terminal_only_is_allowed(self):
+        d = evaluate("Open Terminal.", allowed_apps=("Terminal",))
+        assert d.risk == "low"
+        assert not d.require_confirmation
+        assert d.blocked_apps == ()
+
     def test_safe_summary_task(self):
         d = evaluate("Summarize the current Safari tab", allowed_apps=("Safari",))
         assert d.risk == "low"

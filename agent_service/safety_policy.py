@@ -36,6 +36,12 @@ CONFIRM_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bsign\s+(in|up|out)\b", re.I),
 )
 
+OPEN_ONLY_PATTERN = re.compile(
+    r"^(?!.*\b(and|then|check|run|execute|type|write|search)\b)\s*"
+    r"(open|launch|start)\s+(the\s+)?[\w .-]+(\s+(app|application))?\s*[.!?]?\s*$",
+    re.I,
+)
+
 # Apps that are off-limits to background workers unless explicitly opted in
 # (and even then a high-risk confirmation is required).
 RESTRICTED_APPS: frozenset[str] = frozenset(
@@ -84,9 +90,13 @@ def evaluate(instruction: str, allowed_apps: tuple[str, ...] = ()) -> SafetyDeci
             reasons.append(f"matches blocked pattern: {pat.pattern}")
             risk = "blocked"
 
+    open_only = bool(OPEN_ONLY_PATTERN.match(instruction))
+
     # Restricted app intersection.
     for app in allowed_apps:
         if app in RESTRICTED_APPS:
+            if open_only and app in {"Terminal", "iTerm", "iTerm2"}:
+                continue
             blocked_app_hits.append(app)
             reasons.append(f"restricted app requested: {app}")
             if risk != "blocked":

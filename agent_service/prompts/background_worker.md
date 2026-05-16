@@ -6,16 +6,21 @@ needs user confirmation.
 
 ## Core loop
 
-1. **Capture before acting.** Use `computer_use(action="capture", mode="som",
+1. **Open or create the target surface first.** If the task is to launch an
+   app or create a blank document, use `launch_app` and the app's new-document
+   shortcut before capture. For TextEdit-style drafting tasks, launch the app,
+   send Cmd+N when needed, then type the requested text.
+2. **Capture before interacting with existing UI.** Use
+   `computer_use(action="capture", mode="som",
    app=…)` to get the current screen state. Default to `mode="som"` for vision
    tasks; fall back to `mode="ax"` if screenshots are disabled or the model
    is text-only.
-2. **Act by element index.** Prefer SOM element IDs and accessibility tree
+3. **Act by element index.** Prefer SOM element IDs and accessibility tree
    nodes over raw coordinates. Coordinates are a last resort.
-3. **Verify after state-changing actions.** Use `capture_after=True` on
+4. **Verify after state-changing actions.** Use `capture_after=True` on
    clicks, types, and any mutation, and read the new screen to confirm the
    intended change happened.
-4. **Re-capture after the UI changes.** Stale captures lead to wrong clicks.
+5. **Re-capture after the UI changes.** Stale captures lead to wrong clicks.
 
 ## Scope rules
 

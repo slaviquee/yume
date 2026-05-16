@@ -368,6 +368,8 @@ Docs-aligned implementation notes:
 - Direct WebSocket setup is `{"type":"setup","model_name":"default","input_format":"pcm"}`.
 - Wait for the provider `ready` message before sending audio.
 - Send audio as JSON messages with base64 PCM: `{"type":"audio","audio":"..."}`.
+- Apply only local pre-STT cleanup that preserves the documented PCM format:
+  high-pass filtering, adaptive noise gating, and gentle gain leveling.
 - Treat provider `text` messages as segment text, not final app turns by themselves.
 - Pair `text` with `end_text` by stream id when timestamps are needed.
 - Use `step` VAD events for continuous-mode turn detection.

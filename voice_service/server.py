@@ -10,9 +10,12 @@ base64-encoded as PCM s16le.
 from __future__ import annotations
 
 import asyncio
+import array
 import base64
 import json
 import logging
+import math
+import sys
 from typing import Any, Optional
 
 import websockets
@@ -60,6 +63,8 @@ class VoiceSession:
         self._send_lock = asyncio.Lock()
         self._stt: Optional[SttStream] = None
         self._tts: dict[str, TtsStream] = {}
+        self._stt_audio_frames = 0
+        self._stt_audio_bytes = 0
 
     async def run(self) -> None:
         async for raw in self.ws:
@@ -109,8 +114,11 @@ class VoiceSession:
     async def _stt_start(self, msg: dict) -> None:
         if self._stt is not None:
             await self._stt.close()
+        self._stt_audio_frames = 0
+        self._stt_audio_bytes = 0
         turn_id = msg.get("turnId") or "turn_unknown"
         mode = msg.get("mode") or "push_to_talk"
+        log.info("stt start turn=%s mode=%s", turn_id, mode)
         self._stt = SttStream(self.cfg, mode=mode, turn_id=turn_id, emit=self._on_stt_event)
         await self._stt.open()
 
@@ -118,16 +126,19 @@ class VoiceSession:
         if self._stt is None or not self._stt.is_open:
             return
         pcm = base64.b64decode(msg.get("pcm_b64", ""))
+        self._log_audio_stats(pcm)
         await self._stt.send_audio(pcm)
 
     async def _stt_flush(self, _msg: dict) -> None:
         if self._stt is None:
             return
+        log.info("stt flush frames=%d bytes=%d", self._stt_audio_frames, self._stt_audio_bytes)
         await self._stt.send_flush()
 
     async def _stt_stop(self, _msg: dict) -> None:
         if self._stt is None:
             return
+        log.info("stt stop frames=%d bytes=%d", self._stt_audio_frames, self._stt_audio_bytes)
         await self._stt.send_eos()
         await self._stt.close()
         self._stt = None
@@ -164,9 +175,12 @@ class VoiceSession:
 
     async def _on_stt_event(self, ev: SttEvent) -> None:
         if ev.type == "error":
+            log.warning("stt error turn=%s message=%s", ev.turn_id, ev.message or "")
             await self._send({"type": "error", "code": "stt", "message": ev.message or "", "turnId": ev.turn_id})
             return
         if ev.type in ("partial", "final"):
+            level = logging.INFO if ev.type == "final" else logging.DEBUG
+            log.log(level, "stt %s turn=%s text=%r", ev.type, ev.turn_id, ev.text)
             await self._send(
                 {
                     "type": "stt.transcript",
@@ -196,3 +210,28 @@ class VoiceSession:
     async def _send(self, payload: dict) -> None:
         async with self._send_lock:
             await self.ws.send(json.dumps(payload))
+
+    def _log_audio_stats(self, pcm: bytes) -> None:
+        self._stt_audio_frames += 1
+        self._stt_audio_bytes += len(pcm)
+        if not pcm or len(pcm) % 2 != 0:
+            log.warning("stt audio bad frame bytes=%d", len(pcm))
+            return
+        if self._stt_audio_frames not in (1, 2, 3) and self._stt_audio_frames % 10 != 0:
+            return
+        samples = array.array("h")
+        samples.frombytes(pcm)
+        if sys.byteorder != "little":
+            samples.byteswap()
+        if not samples:
+            return
+        max_abs = max(abs(s) for s in samples)
+        rms = math.sqrt(sum(s * s for s in samples) / len(samples))
+        log.info(
+            "stt audio frame=%d bytes=%d samples=%d rms=%.0f peak=%d",
+            self._stt_audio_frames,
+            len(pcm),
+            len(samples),
+            rms,
+            max_abs,
+        )
