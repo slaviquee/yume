@@ -58,6 +58,8 @@ class AgentServer:
         session = AgentSession(self.cfg, ws)
         try:
             await session.run()
+        except websockets.ConnectionClosed:
+            log.info("client connection closed: %s", ws.remote_address)
         except Exception:  # noqa: BLE001
             log.exception("session crashed")
         finally:

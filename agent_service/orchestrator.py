@@ -167,7 +167,8 @@ class Orchestrator:
             async with self._client.messages.stream(
                 model=self.cfg.foreground_model,
                 system=self._system_prompt,
-                max_tokens=512,
+                max_tokens=self.cfg.foreground_max_tokens,
+                output_config={"effort": self.cfg.foreground_effort},
                 tools=TOOLS,
                 messages=[{"role": m.role, "content": m.content} for m in self._history],
             ) as stream:
@@ -211,6 +212,7 @@ class Orchestrator:
 
                 final = await stream.get_final_message()
                 assistant_blocks = [self._serialize_block(b) for b in final.content]
+                stop_reason = getattr(final, "stop_reason", None)
         except asyncio.CancelledError:
             await self._emit({"type": "agent.thinking", "turnId": turn_id, "active": False})
             if say_started:
@@ -225,6 +227,31 @@ class Orchestrator:
         if say_started:
             await self._emit({"type": "agent.say_end", "utteranceId": utterance_id})
         await self._emit({"type": "agent.thinking", "turnId": turn_id, "active": False})
+
+        if stop_reason in {"max_tokens", "model_context_window_exceeded"}:
+            await self._emit(
+                {
+                    "type": "error",
+                    "code": "foreground_truncated",
+                    "message": f"Claude response stopped early: {stop_reason}",
+                }
+            )
+        elif stop_reason == "pause_turn":
+            await self._emit(
+                {
+                    "type": "error",
+                    "code": "foreground_paused",
+                    "message": "Claude paused before completing the turn.",
+                }
+            )
+        elif stop_reason == "refusal":
+            await self._emit(
+                {
+                    "type": "error",
+                    "code": "foreground_refusal",
+                    "message": "Claude declined to process that request.",
+                }
+            )
 
         history_blocks = [b for b in assistant_blocks if b.get("type") == "text"]
         if history_blocks:

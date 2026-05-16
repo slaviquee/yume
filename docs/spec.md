@@ -361,15 +361,25 @@ Docs-aligned implementation notes:
 ```text
 - Use Gradium Python SDK `stt_realtime` for live microphone input.
 - Use `stt_stream` only for finite audio buffers or files.
-- Default PCM input is 24 kHz, 16-bit signed little-endian, mono.
-- Send 1920-sample / 3840-byte chunks, which is 80 ms at 24 kHz.
+- Capture local Mac microphone input as 24 kHz, 16-bit signed little-endian,
+  mono PCM with 1920-sample / 3840-byte chunks.
+- For the hackathon demo, encode that local PCM to Ogg-wrapped Opus before
+  sending to Gradium (`input_format: "opus"`). This mirrors the public Gradium
+  browser demo more closely than raw PCM transport while staying on a
+  documented input format.
+- Keep `GRADIUM_STT_INPUT_FORMAT=pcm` as the fallback path when ffmpeg is not
+  available or when debugging provider audio without a transcoder.
 - Direct WebSocket fallback endpoint: wss://api.gradium.ai/api/speech/asr.
 - Direct WebSocket auth uses the `x-api-key` header.
-- Direct WebSocket setup is `{"type":"setup","model_name":"default","input_format":"pcm"}`.
-- Wait for the provider `ready` message before sending audio.
-- Send audio as JSON messages with base64 PCM: `{"type":"audio","audio":"..."}`.
-- Apply only local pre-STT cleanup that preserves the documented PCM format:
-  high-pass filtering, adaptive noise gating, and gentle gain leveling.
+- Direct WebSocket setup is `{"type":"setup","model_name":"default","input_format":"opus","json_config":{"language":"en","temp":0.0,"delay_in_frames":16}}`.
+- Do not block local microphone ingestion on the provider `ready` message; send setup first and let the receive loop handle `ready` lazily.
+- Send audio as JSON messages with base64 provider audio: `{"type":"audio","audio":"..."}`.
+- Apply browser-demo-like local pre-STT cleanup by default, preserving the
+  documented provider format: high-pass filtering, adaptive noise gating, and
+  automatic gain control. Set `YUME_DISABLE_LOCAL_AUDIO_CLEANUP=1` only for raw
+  capture debugging.
+- On macOS, explicitly select/downmix a real microphone channel to mono before
+  resampling. Do not depend on implicit multi-channel AVAudioConverter downmixing.
 - Treat provider `text` messages as segment text, not final app turns by themselves.
 - Pair `text` with `end_text` by stream id when timestamps are needed.
 - Use `step` VAD events for continuous-mode turn detection.
@@ -463,12 +473,18 @@ TTS request shape inside the app:
     "apiKeySource": "keychain_or_env",
     "stt": {
       "modelName": "default",
-      "inputFormat": "pcm",
+      "inputFormat": "opus",
+      "localPcmSampleRateHz": 24000,
       "sampleRateHz": 24000,
       "bitDepth": 16,
       "channels": 1,
       "chunkDurationMs": 80,
       "chunkSampleCount": 1920,
+      "jsonConfig": {
+        "language": "en",
+        "temp": 0.0,
+        "delay_in_frames": 16
+      },
       "useVadInContinuousMode": true
     },
     "tts": {

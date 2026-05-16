@@ -5,6 +5,11 @@ VENV := .venv
 PIP := $(VENV)/bin/pip
 PYTHON := $(VENV)/bin/python
 
+ifneq (,$(wildcard .env))
+include .env
+export
+endif
+
 help:
 	@echo "Targets:"
 	@echo "  install     create .venv and install Python deps"
@@ -41,9 +46,12 @@ hermes-patch:
 	fi
 
 services: hermes-patch
+	@mkdir -p logs
+	@: > logs/voice_service.log
+	@: > logs/agent_service.log
 	@trap 'kill 0' INT; \
-	$(PYTHON) -m voice_service & \
-	$(PYTHON) -m agent_service & \
+	YUME_LOG_FILE=logs/voice_service.log $(PYTHON) -m voice_service & \
+	YUME_LOG_FILE=logs/agent_service.log $(PYTHON) -m agent_service & \
 	wait
 
 services-detached: hermes-patch

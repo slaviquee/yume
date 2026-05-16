@@ -301,6 +301,31 @@ def patch_cua_backend(base: Path) -> bool:
     return changed
 
 
+def patch_oneshot_reasoning(base: Path) -> bool:
+    path = base / "hermes_cli/oneshot.py"
+    ensure_file(path)
+    changed = False
+    changed |= replace_once(
+        path,
+        '    from hermes_cli.config import load_config\n'
+        '    from hermes_cli.models import detect_provider_for_model\n',
+        '    from hermes_cli.config import load_config\n'
+        '    from hermes_cli.models import detect_provider_for_model\n'
+        '    from hermes_constants import parse_reasoning_effort\n',
+        "oneshot reasoning import",
+    )
+    changed |= replace_once(
+        path,
+        '        credential_pool=runtime.get("credential_pool"),\n'
+        '        # Interactive callbacks are intentionally NOT wired beyond this\n',
+        '        credential_pool=runtime.get("credential_pool"),\n'
+        '        reasoning_config=parse_reasoning_effort(os.getenv("HERMES_REASONING_EFFORT", "")),\n'
+        '        # Interactive callbacks are intentionally NOT wired beyond this\n',
+        "oneshot reasoning config",
+    )
+    return changed
+
+
 def main() -> int:
     base = Path(sysconfig.get_paths()["purelib"])
     try:
@@ -309,6 +334,7 @@ def main() -> int:
             patch_backend_interface(base),
             patch_tool(base),
             patch_cua_backend(base),
+            patch_oneshot_reasoning(base),
         ]
     except Exception as exc:  # noqa: BLE001
         print(f"hermes computer_use patch failed: {exc}", file=sys.stderr)

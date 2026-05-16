@@ -45,7 +45,7 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                     .monospaced()
             }
-            Text("STT: 24 kHz · 16-bit mono · 80 ms chunks")
+            Text("STT: 24 kHz mono · AGC · Ogg Opus")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text("TTS: 48 kHz · 16-bit mono · whitespace-only chunking")
@@ -67,7 +67,7 @@ struct SettingsView: View {
             HStack {
                 Text("Foreground model")
                 Spacer()
-                Text(ProcessInfo.processInfo.environment["YUME_FOREGROUND_MODEL"] ?? "claude-sonnet-4-20250514")
+                Text(ProcessInfo.processInfo.environment["YUME_FOREGROUND_MODEL"] ?? "claude-sonnet-4-6")
                     .foregroundStyle(.secondary)
                     .monospaced()
             }

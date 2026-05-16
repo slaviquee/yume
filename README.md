@@ -48,6 +48,7 @@ docs/spec.md          Source of truth
 * Xcode 16 (for the Swift app)
 * `xcodegen` — `brew install xcodegen`
 * Python 3.11+
+* `ffmpeg` — `brew install ffmpeg` (used for the demo-like Ogg Opus STT path)
 * Hermes Agent with `computer_use` installed: `hermes computer-use install`
 * A Gradium API key
 

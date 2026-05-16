@@ -26,6 +26,7 @@ import dataclasses
 import json
 import logging
 import os
+import re
 import shutil
 import time
 from typing import AsyncIterator, Literal, Optional
@@ -92,7 +93,7 @@ class RealHermesBridge(HermesBridge):
             os.environ.get("HERMES_INFERENCE_MODEL")
             or os.environ.get("YUME_WORKER_MODEL")
             or os.environ.get("YUME_FOREGROUND_MODEL")
-            or "claude-sonnet-4-20250514"
+            or "claude-sonnet-4-6"
         )
         self._processes: dict[str, asyncio.subprocess.Process] = {}
         self._confirm_queues: dict[str, asyncio.Queue[str]] = {}
@@ -133,6 +134,17 @@ class RealHermesBridge(HermesBridge):
             last_action="hermes.oneshot",
         )
 
+        preflight_error = await self._preflight_computer_use()
+        if preflight_error:
+            log.error("hermes computer-use preflight failed: task=%s error=%s", spec.task_id, preflight_error)
+            yield HermesEvent(
+                kind="error",
+                sequence=seq + 1,
+                timestamp=time.time(),
+                message=preflight_error,
+            )
+            return
+
         prompt = self._build_prompt(spec)
         argv = [
             self.hermes_bin,
@@ -167,11 +179,19 @@ class RealHermesBridge(HermesBridge):
             try:
                 stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=spec.timeout_sec)
             except asyncio.TimeoutError:
+                log.error("hermes timed out: task=%s timeout_sec=%s", spec.task_id, spec.timeout_sec)
                 yield HermesEvent(kind="error", sequence=seq + 1, timestamp=time.time(), message="timeout")
                 return
 
             out_text = stdout.decode("utf-8", errors="replace")
             err_text = stderr.decode("utf-8", errors="replace")
+            log.info(
+                "hermes completed: task=%s rc=%s stdout=%r stderr=%r",
+                spec.task_id,
+                proc.returncode,
+                self._clip_for_log(out_text),
+                self._clip_for_log(err_text),
+            )
             if proc.returncode != 0:
                 message = self._clean_output(err_text or out_text) or f"hermes exited rc={proc.returncode}"
                 yield HermesEvent(
@@ -230,6 +250,7 @@ class RealHermesBridge(HermesBridge):
                 "For requests to open or launch an app, call computer_use(action='list_apps') to find the bundle_id, then computer_use(action='launch_app', bundle_id='...').",
                 "After launching, stop unless the user asked you to do more inside the app.",
                 "For writing into a blank document editor such as TextEdit, launch the app, send computer_use(action='key', keys='cmd+n') if a new document is needed, then use computer_use(action='type', text='...'). Do not wait for a screenshot before creating the first document window.",
+                "For Calculator arithmetic, launch Calculator, call computer_use(action='capture', mode='som', app='Calculator'), clear the current value with computer_use(action='key', keys='escape'), then click the Calculator buttons by their numbered element indices from the capture (digits, Add, Equals, etc.). Do not use computer_use(action='type', text='2+2=') in Calculator because its display is not a text field and AX typing can report success without entering the expression. Verify the displayed result with a follow-up capture.",
                 f"Task title: {spec.title}",
                 f"Allowed apps: {apps}. Do not operate apps outside this list unless the task is impossible otherwise.",
                 f"Capture mode preference: {spec.capture_mode}.",
@@ -241,6 +262,142 @@ class RealHermesBridge(HermesBridge):
                 spec.instruction,
             ]
         )
+
+    async def _preflight_computer_use(self) -> Optional[str]:
+        """Return a user-facing error if CuaDriver is clearly unavailable.
+
+        Hermes can otherwise spend minutes in a worker while the underlying
+        computer-use backend is blind. We keep this check narrow: CuaDriver must
+        be installed and able to see at least one macOS window from its own
+        list_windows tool.
+        """
+        if os.environ.get("YUME_SKIP_HERMES_PREFLIGHT") == "1":
+            return None
+
+        cua_driver = shutil.which("cua-driver")
+        if not cua_driver:
+            return "CuaDriver is not installed. Run `hermes computer-use install --upgrade`, then grant Accessibility and Screen Recording permissions."
+
+        daemon_error = await self._ensure_cuadriver_daemon(cua_driver)
+        if daemon_error is not None:
+            return daemon_error
+        permission_error = await self._check_cuadriver_permissions(cua_driver)
+        if permission_error is not None:
+            return permission_error
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                cua_driver,
+                "call",
+                "list_windows",
+                "{}",
+                "--raw",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=4.0)
+        except asyncio.TimeoutError:
+            return "CuaDriver health check timed out. Restart CuaDriver and grant Accessibility and Screen Recording permissions to CuaDriver.app."
+        except Exception as e:  # noqa: BLE001
+            return f"CuaDriver health check failed: {e}"
+
+        out_text = stdout.decode("utf-8", errors="replace")
+        err_text = stderr.decode("utf-8", errors="replace")
+        if proc.returncode != 0:
+            detail = self._clean_output(err_text or out_text)
+            suffix = f": {detail[:240]}" if detail else ""
+            return f"CuaDriver is not ready{suffix}"
+
+        try:
+            payload = json.loads(out_text)
+        except json.JSONDecodeError:
+            log.warning("cua-driver list_windows returned non-json output: %r", self._clip_for_log(out_text))
+            return "CuaDriver returned an unreadable health-check response. Restart CuaDriver.app and try again."
+
+        structured = payload.get("structuredContent") if isinstance(payload, dict) else {}
+        windows = structured.get("windows") if isinstance(structured, dict) else None
+        if isinstance(windows, list) and windows:
+            return None
+        return (
+            "CuaDriver cannot see any macOS windows, so Hermes cannot operate Calculator yet. "
+            "Open CuaDriver.app once and grant both Accessibility and Screen Recording permissions, then restart yume services."
+        )
+
+    async def _ensure_cuadriver_daemon(self, cua_driver: str) -> Optional[str]:
+        """Ensure `cua-driver call` proxies through CuaDriver.app's TCC grants."""
+        try:
+            status_proc = await asyncio.create_subprocess_exec(
+                cua_driver,
+                "status",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            await asyncio.wait_for(status_proc.communicate(), timeout=2.0)
+            if status_proc.returncode == 0:
+                return None
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            serve_proc = await asyncio.create_subprocess_exec(
+                cua_driver,
+                "serve",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(serve_proc.communicate(), timeout=6.0)
+        except asyncio.TimeoutError:
+            return (
+                "CuaDriver daemon launch timed out. Run `cua-driver serve` once, then retry yume."
+            )
+        except Exception as e:  # noqa: BLE001
+            return f"CuaDriver daemon launch failed: {e}"
+
+        if serve_proc.returncode != 0:
+            detail = self._clean_output(
+                stdout.decode("utf-8", errors="replace") + "\n" + stderr.decode("utf-8", errors="replace")
+            )
+            suffix = f": {detail[:240]}" if detail else ""
+            return f"CuaDriver daemon is not ready{suffix}"
+        return None
+
+    async def _check_cuadriver_permissions(self, cua_driver: str) -> Optional[str]:
+        """Use the daemon's authoritative TCC probe."""
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                cua_driver,
+                "call",
+                "check_permissions",
+                json.dumps({"prompt": False}),
+                "--raw",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=4.0)
+        except asyncio.TimeoutError:
+            return "CuaDriver permission health check timed out. Run `cua-driver serve`, then restart yume services."
+        except Exception as e:  # noqa: BLE001
+            return f"CuaDriver permission health check failed: {e}"
+
+        out_text = stdout.decode("utf-8", errors="replace")
+        err_text = stderr.decode("utf-8", errors="replace")
+        detail = self._clean_output(err_text or out_text)
+        lowered = detail.lower()
+        if proc.returncode != 0:
+            suffix = f": {detail[:240]}" if detail else ""
+            return f"CuaDriver permission health check failed{suffix}"
+        if "accessibility: not granted" in lowered or "accessibility permission not granted" in lowered:
+            return (
+                "macOS denied Accessibility access for CuaDriver.app. "
+                "In System Settings -> Privacy & Security -> Accessibility, toggle CuaDriver.app off and on (or remove/re-add it), "
+                "then restart CuaDriver with `open -n -g -a CuaDriver --args serve` and restart yume services."
+            )
+        if "screen recording: not granted" in lowered or "screen recording permission not granted" in lowered:
+            return (
+                "macOS denied Screen Recording for CuaDriver.app. "
+                "Grant CuaDriver.app Screen Recording in System Settings, then restart CuaDriver and yume services."
+            )
+        return None
 
     @staticmethod
     def _clean_output(text: str) -> str:
@@ -256,6 +413,16 @@ class RealHermesBridge(HermesBridge):
                 continue
             lines.append(line)
         return "\n".join(lines).strip()
+
+    @staticmethod
+    def _clip_for_log(text: str, limit: int = 2000) -> str:
+        redacted = re.sub(r"sk-ant-[A-Za-z0-9_\-]+", "sk-ant-[redacted]", text)
+        redacted = re.sub(r"gsk_[A-Za-z0-9_\-]+", "gsk_[redacted]", redacted)
+        redacted = re.sub(r"(?i)(api[_-]?key=)[^&\s]+", r"\1[redacted]", redacted)
+        cleaned = redacted.replace("\x00", "")
+        if len(cleaned) > limit:
+            return cleaned[:limit] + "...[truncated]"
+        return cleaned
 
     def _normalize(self, msg: dict, sequence: int) -> HermesEvent:
         kind = msg.get("type", "progress")

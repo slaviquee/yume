@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -89,3 +90,45 @@ async def test_multiple_segments_joined():
     ])
     final = [e for e in events if e.type == "final"][-1]
     assert final.text == "open TextEdit and start writing"
+
+
+async def test_audio_after_opus_flush_is_ignored():
+    class FakeWebSocket:
+        def __init__(self) -> None:
+            self.sent: list[dict] = []
+
+        async def send(self, payload: str) -> None:
+            self.sent.append(json.loads(payload))
+
+    class FakeEncoder:
+        def __init__(self) -> None:
+            self.writes: list[bytes] = []
+            self.finished = False
+
+        async def write(self, pcm: bytes) -> None:
+            self.writes.append(pcm)
+
+        async def finish(self) -> None:
+            self.finished = True
+
+        async def close(self) -> None:
+            self.finished = True
+
+    ws = FakeWebSocket()
+    encoder = FakeEncoder()
+    stream = SttStream(
+        GradiumConfig(api_key="test-key", stt_input_format="opus"),
+        mode="push_to_talk",
+        turn_id="t6",
+    )
+    stream._ws = ws  # type: ignore[assignment]
+    stream._accepting_audio = True
+    stream._opus_encoder = encoder  # type: ignore[assignment]
+
+    await stream.send_audio(b"opus input")
+    await stream.send_flush()
+    await stream.send_audio(b"late raw pcm")
+
+    assert encoder.writes == [b"opus input"]
+    assert encoder.finished is True
+    assert [msg["type"] for msg in ws.sent] == ["flush"]

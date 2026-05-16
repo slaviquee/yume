@@ -65,6 +65,7 @@ class VoiceSession:
         self._tts: dict[str, TtsStream] = {}
         self._stt_audio_frames = 0
         self._stt_audio_bytes = 0
+        self._stt_accepting_audio = False
 
     async def run(self) -> None:
         async for raw in self.ws:
@@ -116,14 +117,23 @@ class VoiceSession:
             await self._stt.close()
         self._stt_audio_frames = 0
         self._stt_audio_bytes = 0
+        self._stt_accepting_audio = True
         turn_id = msg.get("turnId") or "turn_unknown"
         mode = msg.get("mode") or "push_to_talk"
-        log.info("stt start turn=%s mode=%s", turn_id, mode)
+        log.info(
+            "stt start turn=%s mode=%s input_format=%s",
+            turn_id,
+            mode,
+            self.cfg.stt_input_format,
+        )
         self._stt = SttStream(self.cfg, mode=mode, turn_id=turn_id, emit=self._on_stt_event)
         await self._stt.open()
 
     async def _stt_audio(self, msg: dict) -> None:
         if self._stt is None or not self._stt.is_open:
+            return
+        if not self._stt_accepting_audio:
+            log.debug("stt audio ignored after flush/stop")
             return
         pcm = base64.b64decode(msg.get("pcm_b64", ""))
         self._log_audio_stats(pcm)
@@ -132,12 +142,14 @@ class VoiceSession:
     async def _stt_flush(self, _msg: dict) -> None:
         if self._stt is None:
             return
+        self._stt_accepting_audio = False
         log.info("stt flush frames=%d bytes=%d", self._stt_audio_frames, self._stt_audio_bytes)
         await self._stt.send_flush()
 
     async def _stt_stop(self, _msg: dict) -> None:
         if self._stt is None:
             return
+        self._stt_accepting_audio = False
         log.info("stt stop frames=%d bytes=%d", self._stt_audio_frames, self._stt_audio_bytes)
         await self._stt.send_eos()
         await self._stt.close()

@@ -14,12 +14,13 @@ import json
 import logging
 import time
 import uuid
-from typing import AsyncIterator, Awaitable, Callable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 from websockets.client import WebSocketClientProtocol
 
 from .config import GradiumConfig
 from .gradium_client import open_gradium_ws, safe_close
+from .opus_encoder import OggOpusEncoder
 
 log = logging.getLogger(__name__)
 
@@ -62,6 +63,10 @@ class SttStream:
         self._emit = emit or (lambda _e: asyncio.sleep(0))
         self._ws: Optional[WebSocketClientProtocol] = None
         self._reader_task: Optional[asyncio.Task[None]] = None
+        self._send_lock = asyncio.Lock()
+        self._audio_lock = asyncio.Lock()
+        self._opus_encoder: Optional[OggOpusEncoder] = None
+        self._accepting_audio = False
         self._segments: list[str] = []
         self._segment_open: bool = False
         self._started_at: Optional[str] = None
@@ -75,24 +80,35 @@ class SttStream:
     async def open(self) -> None:
         self._ws = await open_gradium_ws(self.cfg.stt_url, self.cfg.api_key)
         self._started_at = _now()
-        await self._ws.send(
-            json.dumps(
-                {
-                    "type": "setup",
-                    "model_name": self.cfg.stt_model,
-                    "input_format": "pcm",
-                }
-            )
-        )
-        await self._wait_until_ready()
+        setup: dict[str, Any] = {
+            "type": "setup",
+            "model_name": self.cfg.stt_model,
+            "input_format": self.cfg.stt_input_format,
+        }
+        if self.cfg.stt_json_config:
+            setup["json_config"] = self.cfg.stt_json_config
+        await self._send_json(setup)
         self._reader_task = asyncio.create_task(self._reader())
+        self._accepting_audio = True
+        if self.cfg.stt_input_format == "opus":
+            self._opus_encoder = OggOpusEncoder(
+                sample_rate_hz=self.cfg.stt_sample_rate_hz,
+                channels=1,
+                emit=self._send_audio_payload,
+            )
+            await self._opus_encoder.start()
 
     async def send_audio(self, pcm: bytes) -> None:
         if not self.is_open:
             raise RuntimeError("stt stream is not open")
-        await self._ws.send(  # type: ignore[union-attr]
-            json.dumps({"type": "audio", "audio": base64.b64encode(pcm).decode("ascii")})
-        )
+        async with self._audio_lock:
+            if not self._accepting_audio:
+                log.debug("stt audio ignored after input closed turn=%s bytes=%d", self.turn_id, len(pcm))
+                return
+            if self._opus_encoder is not None:
+                await self._opus_encoder.write(pcm)
+                return
+            await self._send_audio_payload(pcm)
 
     async def send_flush(self) -> None:
         """End-of-input on push-to-talk. Waits for matching `flushed` before
@@ -100,15 +116,30 @@ class SttStream:
         if not self.is_open:
             return
         self._flush_id += 1
-        await self._ws.send(json.dumps({"type": "flush", "flush_id": self._flush_id}))  # type: ignore[union-attr]
+        async with self._audio_lock:
+            self._accepting_audio = False
+            if self._opus_encoder is not None:
+                await self._opus_encoder.finish()
+                self._opus_encoder = None
+        await self._send_json({"type": "flush", "flush_id": self._flush_id})
 
     async def send_eos(self) -> None:
         if not self.is_open:
             return
-        await self._ws.send(json.dumps({"type": "end_of_stream"}))  # type: ignore[union-attr]
+        async with self._audio_lock:
+            self._accepting_audio = False
+            if self._opus_encoder is not None:
+                await self._opus_encoder.finish()
+                self._opus_encoder = None
+        await self._send_json({"type": "end_of_stream"})
 
     async def close(self) -> None:
         self._closed = True
+        async with self._audio_lock:
+            self._accepting_audio = False
+            if self._opus_encoder is not None:
+                await self._opus_encoder.close()
+                self._opus_encoder = None
         if self._reader_task:
             self._reader_task.cancel()
             try:
@@ -117,6 +148,17 @@ class SttStream:
                 pass
         await safe_close(self._ws)
         self._ws = None
+
+    async def _send_audio_payload(self, audio: bytes) -> None:
+        await self._send_json(
+            {"type": "audio", "audio": base64.b64encode(audio).decode("ascii")}
+        )
+
+    async def _send_json(self, payload: dict[str, Any]) -> None:
+        if self._ws is None:
+            return
+        async with self._send_lock:
+            await self._ws.send(json.dumps(payload))
 
     async def _reader(self) -> None:
         assert self._ws is not None
@@ -170,6 +212,12 @@ class SttStream:
         elif kind == "end_of_stream":
             if self._segments:
                 await self._emit_final("eos")
+        elif kind == "ready":
+            log.info(
+                "stt ready turn=%s delay_in_frames=%s",
+                self.turn_id,
+                msg.get("delay_in_frames", ""),
+            )
         elif kind == "error":
             await self._emit(
                 SttEvent(

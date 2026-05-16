@@ -5,6 +5,7 @@ import asyncio
 import logging
 import os
 import signal
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -12,9 +13,15 @@ from .server import VoiceServer
 
 load_dotenv()
 
+handlers: list[logging.Handler] = [logging.StreamHandler()]
+if log_file := os.environ.get("YUME_LOG_FILE"):
+    Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+    handlers.append(logging.FileHandler(log_file))
+
 logging.basicConfig(
     level=logging.DEBUG if os.environ.get("YUME_DEBUG") == "1" else logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    handlers=handlers,
 )
 
 
